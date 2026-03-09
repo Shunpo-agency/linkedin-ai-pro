@@ -12,6 +12,15 @@ RUN pnpm install --frozen-lockfile
 # ── Build Next.js ─────────────────────────────────────────────────────────────
 FROM base AS builder
 WORKDIR /app
+
+# Variables NEXT_PUBLIC_* doivent être disponibles au moment du build
+ARG NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
+ARG NEXT_PUBLIC_APP_URL
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN mkdir -p public && pnpm build
