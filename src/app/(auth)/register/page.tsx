@@ -42,7 +42,7 @@ export default function RegisterPage() {
 
     setLoading(true)
     const supabase = createClient()
-    const { error: authError } = await supabase.auth.signUp({
+    const { data, error: authError } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -56,8 +56,14 @@ export default function RegisterPage() {
       return
     }
 
-    router.push('/dashboard')
-    router.refresh()
+    // Si Supabase exige une confirmation email, la session n'est pas encore active
+    if (data.session) {
+      router.push('/dashboard')
+      router.refresh()
+    } else {
+      setError('✉️ Vérifiez votre email pour confirmer votre compte, puis connectez-vous.')
+      setLoading(false)
+    }
   }
 
   return (
