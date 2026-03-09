@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Next.js",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev:next"],
+      "port": 3000
+    },
+    {
+      "name": "BullMQ Workers",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev:workers"],
+      "autoPort": true
+    }
+  ]
+}
