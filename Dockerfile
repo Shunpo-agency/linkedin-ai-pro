@@ -14,7 +14,7 @@ FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN pnpm build
+RUN mkdir -p public && pnpm build
 
 # ── Production runner ─────────────────────────────────────────────────────────
 FROM base AS runner
