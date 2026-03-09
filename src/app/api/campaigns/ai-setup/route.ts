@@ -66,7 +66,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 600,
+      max_tokens: 1024,
       system: CAMPAIGN_SETUP_SYSTEM,
       messages: [{ role: 'user', content: prompt }],
     })
@@ -76,9 +76,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       throw new Error('Unexpected Claude response format')
     }
 
+    // Strip markdown code fences if Claude wrapped the JSON (```json ... ```)
+    const raw = block.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+
     let result: CampaignSetupResult
     try {
-      result = JSON.parse(block.text.trim()) as CampaignSetupResult
+      result = JSON.parse(raw) as CampaignSetupResult
     } catch {
       throw new Error('Claude returned invalid JSON')
     }
