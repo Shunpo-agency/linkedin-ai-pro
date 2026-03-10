@@ -343,6 +343,20 @@ export async function getHostedAuthUrl(redirectUrl: string): Promise<string> {
 }
 
 /**
+ * Lightweight credentials check — calls GET /api/v1/accounts (no account needed).
+ * Returns { ok: true } if the API key is valid, throws otherwise.
+ */
+export async function pingUnipile(): Promise<{ ok: true; accountCount: number }> {
+  const url = `${getBaseUrl()}/api/v1/accounts`
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: getHeaders(),
+  })
+  const data = await handleResponse<{ items?: unknown[] }>(response, 'ping')
+  return { ok: true, accountCount: data.items?.length ?? 0 }
+}
+
+/**
  * Retrieve basic profile info for a connected Unipile account.
  */
 export async function getAccountInfo(

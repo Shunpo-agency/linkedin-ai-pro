@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { isBusinessHours, parisHour, LINKEDIN_DAILY_INVITE_LIMIT } from '@/lib/human-timing'
+import { pingUnipile } from '@/core/linkedin/unipile.client'
 
 export async function GET(): Promise<NextResponse> {
   try {
@@ -13,6 +14,16 @@ export async function GET(): Promise<NextResponse> {
     const now = new Date()
     const todayStart = new Date(now)
     todayStart.setUTCHours(0, 0, 0, 0)
+
+    // ── Vérification credentials Unipile (silencieuse) ────────────────────────
+    let unipileOk = true
+    let unipileError: string | null = null
+    try {
+      await pingUnipile()
+    } catch (err) {
+      unipileOk = false
+      unipileError = err instanceof Error ? err.message : 'Unipile unreachable'
+    }
 
     // ── Checks en parallèle ───────────────────────────────────────────────────
     const [
@@ -86,6 +97,15 @@ export async function GET(): Promise<NextResponse> {
 
     // Checks de santé
     const checks = [
+      {
+        id: 'unipile',
+        label: 'Clé API Unipile',
+        status: unipileOk ? 'ok' : 'error',
+        message: unipileOk
+          ? 'Connexion Unipile opérationnelle'
+          : `Clé API invalide ou expirée — ${unipileError ?? 'vérifie UNIPILE_API_KEY et UNIPILE_DSN dans Railway'}`,
+        action: unipileOk ? null : 'https://app.unipile.com',
+      },
       {
         id: 'linkedin',
         label: 'LinkedIn connecté',

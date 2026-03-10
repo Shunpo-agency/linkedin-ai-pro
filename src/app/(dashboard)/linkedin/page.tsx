@@ -62,11 +62,18 @@ export default function LinkedInPage() {
       if (data.url) {
         window.location.href = data.url
       } else {
-        setError(data.error ?? 'Failed to start connection')
+        // Rendre l'erreur Unipile 401 plus lisible
+        const raw: string = data.error ?? 'Échec de la connexion'
+        const friendly = raw.includes('401') || raw.toLowerCase().includes('unauthorized')
+          ? '❌ Clé API Unipile invalide ou expirée. Vérifie les variables UNIPILE_API_KEY et UNIPILE_DSN dans Railway.'
+          : raw.includes('UNIPILE_API_KEY') || raw.includes('UNIPILE_DSN')
+            ? '❌ Variables d\'environnement Unipile manquantes dans Railway (UNIPILE_API_KEY / UNIPILE_DSN).'
+            : raw
+        setError(friendly)
         setConnecting(false)
       }
     } catch {
-      setError('Failed to start connection')
+      setError('Échec de la connexion — vérifie ta connexion internet')
       setConnecting(false)
     }
   }
