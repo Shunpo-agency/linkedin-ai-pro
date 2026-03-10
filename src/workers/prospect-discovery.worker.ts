@@ -5,18 +5,25 @@ import { findAndCreateProspects } from '@/core/agent/actions/linkedin.actions'
 import { generateAndQueueMessage } from '@/core/agent/actions/ai.actions'
 import { messageSenderQueue, prospectDiscoveryQueue } from './queues'
 import type { PersonaConfig } from '@/core/agent/intents/types'
+import {
+  isBusinessHours,
+  spreadInvitesAcrossDay,
+  startupJitterMs,
+  LINKEDIN_DAILY_INVITE_LIMIT,
+} from '@/lib/human-timing'
 
 interface ProspectDiscoveryJob {
   userId: string
   limit?: number
+  skipJitter?: boolean // true pour les déclenchements manuels
 }
 
 export const prospectDiscoveryWorker = new Worker<ProspectDiscoveryJob>(
   'prospect-discovery',
   async (job) => {
-    const { userId, limit = 20 } = job.data
+    const { userId, limit = LINKEDIN_DAILY_INVITE_LIMIT, skipJitter = false } = job.data
 
-    // ── Dispatcher pattern: "all" → one job per active user ─────────────────
+    // ── Dispatcher : "all" → un job par utilisateur actif ───────────────────
     if (userId === 'all') {
       const supabase = createServiceClient()
       const { data: accounts } = await supabase
@@ -36,11 +43,23 @@ export const prospectDiscoveryWorker = new Worker<ProspectDiscoveryJob>(
       return { dispatched: users.length }
     }
 
-    console.log(`[prospect-discovery] Running for user ${userId}, limit ${limit}`)
+    // ── Anti-détection : vérifier les heures ouvrées ─────────────────────────
+    if (!isBusinessHours()) {
+      console.log('[prospect-discovery] Outside business hours — skipping to avoid LinkedIn detection')
+      return { skipped: true, reason: 'outside_business_hours' }
+    }
 
+    // ── Anti-détection : jitter de démarrage (sauf déclenchement manuel) ────
+    if (!skipJitter) {
+      const jitter = startupJitterMs()
+      console.log(`[prospect-discovery] Startup jitter: waiting ${Math.round(jitter / 60000)} min`)
+      await new Promise((resolve) => setTimeout(resolve, jitter))
+    }
+
+    console.log(`[prospect-discovery] Running for user ${userId}, limit ${limit}`)
     const supabase = createServiceClient()
 
-    // ── Guard: LinkedIn account required ─────────────────────────────────────
+    // ── Guard : compte LinkedIn requis ───────────────────────────────────────
     const { data: linkedinAccount } = await supabase
       .from('linkedin_accounts')
       .select('unipile_account_id')
@@ -51,10 +70,10 @@ export const prospectDiscoveryWorker = new Worker<ProspectDiscoveryJob>(
 
     if (!linkedinAccount) {
       console.log('[prospect-discovery] No active LinkedIn account — skipping')
-      return { created: 0, queued: 0 }
+      return { created: 0, queued: 0, error: 'no_linkedin_account' }
     }
 
-    // ── Get persona config ────────────────────────────────────────────────────
+    // ── Guard : persona configuré ────────────────────────────────────────────
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: settings } = await (supabase as any)
       .from('business_settings')
@@ -64,12 +83,33 @@ export const prospectDiscoveryWorker = new Worker<ProspectDiscoveryJob>(
 
     if (!settings?.target_persona) {
       console.log('[prospect-discovery] No target persona configured — skipping')
-      return { created: 0, queued: 0 }
+      return { created: 0, queued: 0, error: 'no_persona' }
     }
 
     const persona = settings.target_persona as unknown as PersonaConfig
 
-    // ── Exclude already-known prospects ──────────────────────────────────────
+    // ── Vérifier la limite journalière déjà atteinte ─────────────────────────
+    const todayStart = new Date()
+    todayStart.setUTCHours(0, 0, 0, 0)
+
+    const { count: todaySent } = await supabase
+      .from('messages')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('direction', 'outbound')
+      .gte('created_at', todayStart.toISOString())
+
+    const alreadySentToday = todaySent ?? 0
+    const remainingToday = Math.max(0, LINKEDIN_DAILY_INVITE_LIMIT - alreadySentToday)
+
+    if (remainingToday === 0) {
+      console.log(`[prospect-discovery] Daily limit reached (${LINKEDIN_DAILY_INVITE_LIMIT}) — skipping`)
+      return { created: 0, queued: 0, error: 'daily_limit_reached', sentToday: alreadySentToday }
+    }
+
+    const safeLimit = Math.min(limit, remainingToday)
+
+    // ── Exclure les prospects déjà connus ────────────────────────────────────
     const { data: existing } = await supabase
       .from('prospects')
       .select('linkedin_id')
@@ -80,16 +120,15 @@ export const prospectDiscoveryWorker = new Worker<ProspectDiscoveryJob>(
       .map((p) => (p as { linkedin_id: string | null }).linkedin_id as string)
       .filter(Boolean)
 
-    // ── Discover new prospects via Unipile ───────────────────────────────────
-    const result = await findAndCreateProspects(userId, persona, limit, excludeIds)
+    // ── Découverte via Unipile ───────────────────────────────────────────────
+    const result = await findAndCreateProspects(userId, persona, safeLimit, excludeIds)
     console.log(`[prospect-discovery] Created ${result.created} new prospects`)
 
     if (result.created === 0) {
       return { ...result, queued: 0 }
     }
 
-    // ── Queue connection requests for the newly found prospects ──────────────
-    // Fetch the freshest not_connected prospects (those just created)
+    // ── Planifier les demandes de connexion avec délais humains ─────────────
     const { data: newProspects } = await supabase
       .from('prospects')
       .select('id')
@@ -97,20 +136,19 @@ export const prospectDiscoveryWorker = new Worker<ProspectDiscoveryJob>(
       .eq('connection_status', 'not_connected')
       .eq('source', 'ai_search')
       .order('created_at', { ascending: false })
-      .limit(limit)
+      .limit(safeLimit)
+
+    const prospects = newProspects ?? []
+    // Délais étalés sur le reste de la journée (anti-détection)
+    const delays = spreadInvitesAcrossDay(prospects.length)
 
     let queued = 0
-
-    for (const prospect of newProspects ?? []) {
+    for (let i = 0; i < prospects.length; i++) {
+      const prospect = prospects[i]
       try {
         const prospectId = (prospect as { id: string }).id
-
-        // Generate a personalized opener / connection note via Claude
         const openerMessage = await generateAndQueueMessage(userId, prospectId)
-
-        // Stagger requests: 4 min apart + up to 2 min jitter (human-like pacing)
-        const staggerMs = queued * 4 * 60 * 1000
-        const jitterMs = Math.floor(Math.random() * 2 * 60 * 1000)
+        const delayMs = delays[i] ?? (i * 6 * 60_000) // fallback: 6 min entre chaque
 
         await messageSenderQueue.add(
           'connection-request',
@@ -120,20 +158,21 @@ export const prospectDiscoveryWorker = new Worker<ProspectDiscoveryJob>(
             content: openerMessage,
             type: 'connection_request' as const,
           },
-          { delay: staggerMs + jitterMs },
+          { delay: delayMs },
         )
 
+        console.log(`[prospect-discovery] Queued invite for ${prospectId} in ${Math.round(delayMs / 60000)} min`)
         queued++
       } catch (err) {
         console.error(
-          `[prospect-discovery] Failed to queue connection request for ${(prospect as { id: string }).id}:`,
+          `[prospect-discovery] Failed to queue for ${(prospect as { id: string }).id}:`,
           err,
         )
       }
     }
 
     console.log(`[prospect-discovery] Queued ${queued} connection requests`)
-    return { ...result, queued }
+    return { ...result, queued, sentToday: alreadySentToday, remainingToday }
   },
   {
     connection: redis,

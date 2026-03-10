@@ -1,8 +1,6 @@
 /**
  * BullMQ Worker Entry Point
- *
- * Run with: pnpm dev:workers (tsx src/workers/index.ts)
- * In production: pm2 start dist/workers/index.js
+ * Run: pnpm dev:workers | pnpm workers (production)
  */
 
 import 'dotenv/config'
@@ -22,52 +20,66 @@ import {
   generateSequenceQueue,
   sendScheduledQueue,
 } from './queues'
+import { randomInt } from '@/lib/human-timing'
 
 console.log('[Workers] Starting BullMQ workers…')
 
-// Register recurring jobs
+// ── Plannings avec variance aléatoire (anti-pattern LinkedIn) ────────────────
 async function registerRecurringJobs(): Promise<void> {
-  // Daily prospect discovery at 8 AM UTC
+  // Découverte : deux créneaux par jour (matin + après-midi) avec jitter
+  // Slot 1 : 8h00-8h30 Paris → 6h UTC winter / 7h UTC summer
+  // On utilise une fourchette large et laisse le worker gérer le jitter réel
+  const morningMinute = randomInt(0, 29) // 8h00-8h29
   await prospectDiscoveryQueue.add(
-    'daily-discovery',
+    'daily-discovery-morning',
     { userId: 'all' },
     {
-      repeat: { pattern: '0 8 * * *' },
-      jobId: 'recurring-daily-discovery',
+      repeat: { pattern: `${morningMinute} 7 * * 1-5` }, // lun-ven 8h Paris (7h UTC)
+      jobId: 'recurring-discovery-morning',
     },
   )
 
-  // Follow-up checker every 6 hours
+  // Slot 2 : 14h00-14h30 Paris (après la pause déjeuner)
+  const afternoonMinute = randomInt(0, 29)
+  await prospectDiscoveryQueue.add(
+    'daily-discovery-afternoon',
+    { userId: 'all' },
+    {
+      repeat: { pattern: `${afternoonMinute} 13 * * 1-5` }, // 14h Paris (13h UTC)
+      jobId: 'recurring-discovery-afternoon',
+    },
+  )
+
+  // Follow-up : toutes les 4h pendant les heures ouvrées (8h, 12h, 16h Paris)
   await followUpCheckerQueue.add(
     'follow-up-check',
     { userId: 'all' },
     {
-      repeat: { pattern: '0 */6 * * *' },
+      repeat: { pattern: '0 7,11,15 * * 1-5' }, // 8h, 12h, 16h Paris (UTC)
       jobId: 'recurring-follow-up-check',
     },
   )
 
-  // Weekly persona refiner on Monday at 9 AM UTC
-  await personaRefinerQueue.add(
-    'weekly-persona-refine',
-    { userId: 'all' },
-    {
-      repeat: { pattern: '0 9 * * 1' },
-      jobId: 'recurring-persona-refine',
-    },
-  )
-
-  // Send scheduled messages every 30 minutes
+  // Envoi des messages planifiés : toutes les 20 min (plus réactif)
   await sendScheduledQueue.add(
     'send-scheduled-check',
     {},
     {
-      repeat: { pattern: '*/30 * * * *' },
+      repeat: { pattern: '*/20 7-19 * * 1-5' }, // toutes les 20 min, heures ouvrées
       jobId: 'recurring-send-scheduled',
     },
   )
 
-  // Register generateSequenceQueue for reference (jobs added on-demand)
+  // Persona refiner : lundi matin à 9h Paris
+  await personaRefinerQueue.add(
+    'weekly-persona-refine',
+    { userId: 'all' },
+    {
+      repeat: { pattern: '0 8 * * 1' }, // lundi 9h Paris
+      jobId: 'recurring-persona-refine',
+    },
+  )
+
   void generateSequenceQueue
 
   console.log('[Workers] Recurring jobs registered')
@@ -77,7 +89,7 @@ registerRecurringJobs().catch((err: Error) => {
   console.error('[Workers] Failed to register recurring jobs:', err.message)
 })
 
-// Graceful shutdown
+// ── Graceful shutdown ────────────────────────────────────────────────────────
 const workers = [
   messageSenderWorker,
   leadScorerWorker,
@@ -91,13 +103,13 @@ const workers = [
 ]
 
 process.on('SIGTERM', async () => {
-  console.log('[Workers] SIGTERM received, shutting down gracefully…')
+  console.log('[Workers] SIGTERM — graceful shutdown…')
   await Promise.all(workers.map((w) => w.close()))
   process.exit(0)
 })
 
 process.on('SIGINT', async () => {
-  console.log('[Workers] SIGINT received, shutting down gracefully…')
+  console.log('[Workers] SIGINT — graceful shutdown…')
   await Promise.all(workers.map((w) => w.close()))
   process.exit(0)
 })
